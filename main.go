@@ -238,22 +238,22 @@ type retention struct {
 }
 
 // isTombstoned determines whether or not a tweet should be deleted
-func (k retention) isTombstoned(logger *zap.Logger, t twitter.Tweet, now time.Time) (bool, error) {
+func (r retention) isTombstoned(logger *zap.Logger, t twitter.Tweet, now time.Time) (bool, error) {
 	createdAt, err := t.CreatedAtTime()
 	if err != nil {
 		return false, err
 	}
 	age := now.Sub(createdAt)
 
-	if age < k.maxAge {
+	if age < r.maxAge {
 		return false, nil
 	}
-	for _, id := range k.ids {
+	for _, id := range r.ids {
 		if id == t.ID {
 			return false, nil
 		}
 	}
-	for _, keyword := range k.keywords {
+	for _, keyword := range r.keywords {
 		if strings.Contains(t.Text, keyword) {
 			return false, nil
 		}
