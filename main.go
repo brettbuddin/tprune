@@ -28,7 +28,7 @@ func main() {
 	flagset.StringVar(&cfg.consumerSecret, "consumer-secret", "", "Twitter Consumer Secret")
 	flagset.StringVar(&cfg.oauthToken, "oauth-token", "", "Twitter OAuth Token")
 	flagset.StringVar(&cfg.oauthTokenSecret, "oauth-token-secret", "", "Twitter OAuth Token Secret")
-	flagset.DurationVar(&cfg.retention.maxAge, "max-age", 60*24*time.Hour, "Maximum age to keep. Tweets older than this will be deleted.")
+	flagset.DurationVar(&cfg.retention.maxAge, "max-age", 0, "Maximum age to keep. Tweets older than this will be deleted.")
 	flagset.StringVar(&cfg.logLevel, "log-level", "info", "Log level")
 	flagset.StringVar(&keepIDs, "keep-ids", "", "Tweet IDs to keep forever.")
 	flagset.StringVar(&keepKeywords, "keep-keywords", "", "Tweet keywords to keep forever.")
