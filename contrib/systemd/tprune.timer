@@ -1,0 +1,12 @@
+# /etc/systemd/system/tprune.timer
+
+[Unit]
+Description=Run tprune every day
+Requires=tprune.service
+
+[Timer]
+Unit=tprune.service
+OnCalendar=daily
+
+[Install]
+WantedBy=timers.target

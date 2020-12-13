@@ -1,0 +1,19 @@
+# /etc/systemd/system/tprune.service
+
+[Unit]
+Description=Run tprune
+Wants=tprune.timer
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/tprune.env
+ExecStart=/usr/local/bin/tprune \
+  -username="${TPRUNE_USERNAME}" \
+  -max-age="${TPRUNE_MAX_AGE}" \
+  -consumer-key="${TPRUNE_CONSUMER_KEY}" \
+  -consumer-secret="${TPRUNE_CONSUMER_SECRET}" \
+  -oauth-token="${TPRUNE_OAUTH_TOKEN}" \
+  -oauth-token-secret="${TPRUNE_OAUTH_TOKEN_SECRET}"
+
+[Install]
+WantedBy=multi-user.target
