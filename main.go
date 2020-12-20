@@ -101,16 +101,37 @@ func run(cfg config) error {
 		token      = oauth1.NewToken(cfg.oauthToken, cfg.oauthTokenSecret)
 		httpClient = config.Client(context.Background(), token)
 		client     = twitter.NewClient(httpClient)
-		fetcher    = newFetcher(client, cfg.username)
-		destroyer  = newDestroyer(client, cfg.retention)
 	)
 
-	for fetcher.fetch() {
-		if fetcher.err != nil {
-			return fmt.Errorf("failed to fetch: %w", fetcher.err)
+	account, _, err := client.Accounts.VerifyCredentials(nil)
+	if err != nil {
+		return fmt.Errorf("failed to verify credentials: %w", err)
+	}
+	logger.Info("Verified credentials",
+		zap.String("id", account.IDStr),
+		zap.String("username", account.ScreenName))
+
+	tweetFetcher := newTweetFetcher(client, account.ScreenName)
+	favoriteFetcher := newFavoriteFetcher(client, account.ID)
+	destroyer := newDestroyer(client, cfg.retention)
+
+	for tweetFetcher.fetch() {
+		if tweetFetcher.err != nil {
+			return fmt.Errorf("failed to fetch: %w", tweetFetcher.err)
 		}
-		for _, t := range fetcher.tweets {
-			if err := destroyer.destroy(logger, t); err != nil {
+		for _, t := range tweetFetcher.tweets {
+			if err := destroyer.destroyTweet(logger, t); err != nil {
+				return fmt.Errorf("failed to delete: %w", err)
+			}
+		}
+	}
+
+	for favoriteFetcher.fetch() {
+		if favoriteFetcher.err != nil {
+			return fmt.Errorf("failed to fetch: %w", favoriteFetcher.err)
+		}
+		for _, t := range favoriteFetcher.tweets {
+			if err := destroyer.destroyFavorite(logger, t); err != nil {
 				return fmt.Errorf("failed to delete: %w", err)
 			}
 		}
@@ -119,8 +140,8 @@ func run(cfg config) error {
 	return nil
 }
 
-// fetcher steps across all tweets in a username's timeline
-type fetcher struct {
+// tweetFetcher steps across all tweets in a username's timeline
+type tweetFetcher struct {
 	client   *twitter.Client
 	username string
 	maxID    int64
@@ -129,9 +150,9 @@ type fetcher struct {
 	err    error
 }
 
-// newFetcher returns a new fetcher
-func newFetcher(client *twitter.Client, username string) *fetcher {
-	return &fetcher{
+// newTweetFetcher returns a new fetcher
+func newTweetFetcher(client *twitter.Client, username string) *tweetFetcher {
+	return &tweetFetcher{
 		client:   client,
 		username: username,
 	}
@@ -143,7 +164,7 @@ func newFetcher(client *twitter.Client, username string) *fetcher {
 //
 // The resulting tweets are stored in the "tweets" struct field. Any errors that
 // occur will be reflected in the "err" field.
-func (f *fetcher) fetch() bool {
+func (f *tweetFetcher) fetch() bool {
 	var (
 		resp   *http.Response
 		err    error
@@ -175,7 +196,60 @@ func (f *fetcher) fetch() bool {
 	return false
 }
 
-// destroyer deletes tweets based on retention rules
+// favoriteFetcher fetches favorited tweets
+type favoriteFetcher struct {
+	client    *twitter.Client
+	accountID int64
+	maxID     int64
+
+	tweets []twitter.Tweet
+	err    error
+}
+
+// newFavoriteFetcher returns a new favorite fetcher
+func newFavoriteFetcher(client *twitter.Client, accountID int64) *favoriteFetcher {
+	return &favoriteFetcher{
+		client:    client,
+		accountID: accountID,
+	}
+}
+
+// fetch gets a list of favorited tweets. It should be called continuously as an
+// iterator. A return value of "true" means there are potentially more tweets to
+// be fetched. A value of "false" means there are no more tweets to be fetched.
+//
+// The resulting tweets are stored in the "tweets" struct field. Any errors that
+// occur will be reflected in the "err" field.
+func (f *favoriteFetcher) fetch() bool {
+	var (
+		resp   *http.Response
+		err    error
+		params = &twitter.FavoriteListParams{
+			UserID: f.accountID,
+			Count:  200,
+			MaxID:  f.maxID,
+		}
+	)
+	f.tweets, resp, err = f.client.Favorites.List(params)
+	if err != nil {
+		if resp.StatusCode == http.StatusTooManyRequests {
+			if err := backOff(resp.Header); err != nil {
+				f.err = fmt.Errorf("failed to back off: %w", err)
+				return false
+			}
+		} else {
+			f.err = fmt.Errorf("failed to fetch tweets: %w", err)
+			return false
+		}
+	}
+	if len(f.tweets) > 0 {
+		f.maxID = f.tweets[len(f.tweets)-1].ID - 1
+		return true
+	}
+	return false
+}
+
+// destroyer deletes tweets and favorites based on retention rules
 type destroyer struct {
 	client    *twitter.Client
 	now       time.Time
@@ -186,13 +260,13 @@ type destroyer struct {
 func newDestroyer(client *twitter.Client, r retention) destroyer {
 	return destroyer{
 		client:    client,
-		retention: r,
 		now:       time.Now(),
+		retention: r,
 	}
 }
 
-// destroy deletes a tweet
-func (d destroyer) destroy(logger *zap.Logger, t twitter.Tweet) error {
+// destroyTweet deletes a tweet
+func (d destroyer) destroyTweet(logger *zap.Logger, t twitter.Tweet) error {
 	logger = logger.With(
 		zap.Int64("id", t.ID))
 
@@ -201,12 +275,42 @@ func (d destroyer) destroy(logger *zap.Logger, t twitter.Tweet) error {
 		return err
 	}
 	if !evict {
-		logger.Info("Keeping")
+		logger.Info("Keeping Tweet")
 		return nil
 	}
 
-	logger.Info("Deleting")
+	logger.Info("Deleting Tweet")
 	_, resp, err := d.client.Statuses.Destroy(t.ID, nil)
+	if err != nil {
+		if resp.StatusCode == http.StatusTooManyRequests {
+			if err := backOff(resp.Header); err != nil {
+				return fmt.Errorf("failed to back off: %w", err)
+			}
+		} else {
+			return err
+		}
+	}
+	return nil
+}
+
+// destroyFavorite deletes a favorited tweet
+func (d destroyer) destroyFavorite(logger *zap.Logger, t twitter.Tweet) error {
+	logger = logger.With(
+		zap.Int64("id", t.ID))
+
+	evict, err := d.retention.isTombstoned(logger, t, d.now)
+	if err != nil {
+		return err
+	}
+	if !evict {
+		logger.Info("Keeping Favorite")
+		return nil
+	}
+
+	logger.Info("Deleting Favorite")
+	_, resp, err := d.client.Favorites.Destroy(&twitter.FavoriteDestroyParams{
+		ID: t.ID,
+	})
 	if err != nil {
 		if resp.StatusCode == http.StatusTooManyRequests {
 			if err := backOff(resp.Header); err != nil {
